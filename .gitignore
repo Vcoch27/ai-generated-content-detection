@@ -1,1 +1,13 @@
 .idea/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# AI Service specific
+ai-service/.venv/
+ai-service/__pycache__/
+ai-service/*.pyc
+ai-service/.env
+ai-service/logs/
