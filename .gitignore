@@ -4,3 +4,8 @@ __pycache__/
 .venv/
 temp_*
 *.log
+*.py[cod]
+
+# OS
+.DS_Store
+Thumbs.db
