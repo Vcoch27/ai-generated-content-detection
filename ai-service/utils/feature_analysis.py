@@ -91,6 +91,33 @@ def get_local_feature_impact(explainer, input_vector, prediction_label):
     return analysis_results
 
 
+def get_analysis_from_mean_shap(mean_shap_1d, prediction_label):
+    """
+    Chuyển đổi mảng SHAP trung bình thành danh sách giải thích Top 5
+    """
+    cv_shap = mean_shap_1d[:27]
+    top_indices = np.argsort(np.abs(cv_shap))[-5:][::-1]
+
+    total_abs_contribution = np.sum(np.abs(mean_shap_1d))
+    if total_abs_contribution == 0: total_abs_contribution = 1e-10
+
+    pov_key = "AI" if prediction_label == "AI_GENERATED" else "REAL"
+    analysis_results = []
+
+    for idx in top_indices:
+        idx_int = int(idx)
+        category = get_category(idx_int)
+        impact_pct = (abs(cv_shap[idx_int]) / total_abs_contribution) * 100
+
+        analysis_results.append({
+            "feature_name": CV_FEATURE_NAMES[idx_int],
+            "category": category,
+            "impact_score": round(float(impact_pct), 2),
+            "description": DUAL_FEATURE_DICTIONARY[category][pov_key]
+        })
+    return analysis_results
+
+
 def log_all_feature_importances(rf_model):
     """
     In ra toàn bộ 77 đặc trưng theo thứ tự giảm dần của mức độ quan trọng

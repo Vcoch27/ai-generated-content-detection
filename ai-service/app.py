@@ -1,20 +1,23 @@
 import os
+import cv2
 import joblib
 import logging
 import shap
+import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from tensorflow.keras.models import load_model
 from contextlib import asynccontextmanager
 
-# Import các utils chuyên biệt đã xây dựng
 from utils.image_processing import preprocess_for_cv, preprocess_for_cnn, encode_image_to_base64
 from utils.feature_extraction import get_hybrid_vector
 from utils.xai_processing import make_gradcam_heatmap
-from utils.feature_analysis import log_all_feature_importances, get_local_feature_impact
+from utils.feature_analysis import log_all_feature_importances, get_local_feature_impact, get_analysis_from_mean_shap
+from utils.video_processing import extract_frames, cleanup_frames
+from utils.aggregation_logic import perform_video_aggregation
 
-# ===== CẤU HÌNH LOGGING =====
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,7 @@ PURE_CNN_PATH = os.path.join(MODEL_DIR, "ai_detector_model_pure_cnn.keras")
 PCA_PATH = os.path.join(MODEL_DIR, "hybrid_pca_transformer.joblib")
 RF_PATH = os.path.join(MODEL_DIR, "ai_detector_final_model_hybrid_fusion.joblib")
 
-# ===== QUẢN LÝ LIFESPAN (Thay cho on_event cũ) =====
+# ===== QUẢN LÝ LIFESPAN (Khởi tạo) =====
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Phần này chạy khi startup
@@ -156,6 +159,91 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         if os.path.exists(temp_path): os.remove(temp_path)
         logger.error(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict-video")
+async def predict_video(file: UploadFile = File(...)):
+    if rf_classifier is None:
+        raise HTTPException(status_code=500, detail="Hệ thống chưa sẵn sàng!")
+
+    temp_video_path = f"video_temp_{file.filename}"
+    frame_dir = f"frames_{file.filename}"
+
+    try:
+        # 1. Lưu video tạm
+        contents = await file.read()
+        with open(temp_video_path, "wb") as f:
+            f.write(contents)
+
+        # 2. Cắt 20 frames đại diện
+        frame_paths = extract_frames(temp_video_path, num_frames=20, output_dir=frame_dir)
+        if not frame_paths:
+            raise Exception("Không thể trích xuất frames từ video.")
+
+        # 3. Chạy Pipeline dự đoán cho từng frame (Batch Processing)
+        frame_results = []
+        for path in frame_paths:
+            # Lấy vector 77 chiều
+            feat_77 = get_hybrid_vector(path, cnn_extractor, pca_transformer, preprocess_for_cv, preprocess_for_cnn)
+
+            # Dự đoán
+            pred_idx = int(rf_classifier.predict(feat_77)[0])
+            probs = rf_classifier.predict_proba(feat_77)[0]
+
+            # Tính SHAP cho frame này
+            shap_raw = explainer.shap_values(feat_77)
+            # Ép về 1D 77 phần tử
+            shap_1d = np.array(shap_raw[:, :, pred_idx]).flatten()
+
+            frame_results.append({
+                "prediction": "AI_GENERATED" if pred_idx == 0 else "REAL",
+                "confidence": float(probs[pred_idx]),
+                "ai_prob": float(probs[0]),
+                "real_prob": float(probs[1]),
+                "shap_values": shap_1d,
+                "frame_path": path
+            })
+
+        # 4. Thực hiện "Hội chẩn" tổng hợp kết quả (Aggregation)
+        video_report = perform_video_aggregation(frame_results)
+
+        key_frame_path = video_report['key_frame_path']
+        # Đọc ảnh gốc bằng OpenCV (giữ nguyên định dạng BGR)
+        key_frame_bgr = cv2.imread(key_frame_path)
+        original_keyframe_base64 = encode_image_to_base64(key_frame_bgr)
+
+        # 5. Xử lý XAI cho KEY FRAME
+        # Tạo heatmap cho frame "AI nhất" hoặc "Thật nhất"
+        img_cnn_key = preprocess_for_cnn(key_frame_path)
+        heatmap_img = make_gradcam_heatmap(img_cnn_key, cnn_pure_full)
+        heatmap_base64 = encode_image_to_base64(heatmap_img)
+
+        # 6. Lấy Top 5 giải thích từ SHAP trung bình
+        cv_analysis = get_analysis_from_mean_shap(video_report['mean_shap'], video_report['prediction'])
+
+        # 7. Dọn dẹp
+        if os.path.exists(temp_video_path): os.remove(temp_video_path)
+        cleanup_frames(frame_dir)
+
+        # Trả về JSON Response
+        return {
+            "filename": file.filename,
+            "prediction": video_report['prediction'],
+            "confidence": video_report['confidence'],
+            "consistency": video_report['consistency'],
+            "votes": video_report['votes'],
+            "key_frame_base64": original_keyframe_base64,
+            "heatmap_base64": heatmap_base64,
+            "cv_analysis": cv_analysis,
+            "timeline": video_report['timeline'],
+            "status": "success"
+        }
+
+    except Exception as e:
+        if os.path.exists(temp_video_path): os.remove(temp_video_path)
+        cleanup_frames(frame_dir)
+        logger.error(f"Video Predict Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
