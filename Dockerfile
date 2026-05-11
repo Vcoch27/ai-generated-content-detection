@@ -1,20 +1,15 @@
-FROM python:3.10-slim
+FROM python:3.10
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
 WORKDIR /app
 
-COPY ai-service/requirements.txt /app/requirements.txt
+COPY --chown=user ai-service/requirements.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-
-COPY ai-service /app
+COPY --chown=user ai-service /app
 
 EXPOSE 7860
 
